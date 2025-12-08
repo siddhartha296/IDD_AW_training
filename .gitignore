@@ -1,2 +1,4 @@
 /train
 /val
+/test_checkpoint
+/checkpoints
