@@ -1,4 +1,4 @@
-#models_LH.py
+#models_LH.py - FIXED VERSION with proper high-resolution output
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,7 +6,7 @@ import segmentation_models_pytorch as smp
 
 
 class SimpleDecoder(nn.Module):
-    """Simple decoder for UGF-Net to avoid API compatibility issues"""
+    """High-resolution decoder for UGF-Net with proper upsampling to match input size"""
     
     def __init__(self, encoder_channels, decoder_channels=256, num_classes=30):
         super().__init__()
@@ -14,33 +14,41 @@ class SimpleDecoder(nn.Module):
         # ASPP module for multi-scale context
         self.aspp = ASPPModule(encoder_channels[-1], decoder_channels)
         
-        # Decoder blocks with upsampling (4x upsampling total = 16x with final)
+        # Decoder blocks with proper upsampling
+        # ResNet50 has 32x downsampling, so we need 5 upsample blocks (2^5 = 32)
         self.decoder_block1 = nn.Sequential(
             nn.Conv2d(decoder_channels, decoder_channels // 2, kernel_size=3, padding=1),
             nn.BatchNorm2d(decoder_channels // 2),
             nn.ReLU(inplace=True),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 2x
         )
         
         self.decoder_block2 = nn.Sequential(
             nn.Conv2d(decoder_channels // 2, decoder_channels // 4, kernel_size=3, padding=1),
             nn.BatchNorm2d(decoder_channels // 4),
             nn.ReLU(inplace=True),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 4x
         )
         
         self.decoder_block3 = nn.Sequential(
             nn.Conv2d(decoder_channels // 4, decoder_channels // 8, kernel_size=3, padding=1),
             nn.BatchNorm2d(decoder_channels // 8),
             nn.ReLU(inplace=True),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 8x
         )
         
         self.decoder_block4 = nn.Sequential(
             nn.Conv2d(decoder_channels // 8, decoder_channels // 8, kernel_size=3, padding=1),
             nn.BatchNorm2d(decoder_channels // 8),
             nn.ReLU(inplace=True),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 16x
+        )
+        
+        self.decoder_block5 = nn.Sequential(
+            nn.Conv2d(decoder_channels // 8, decoder_channels // 8, kernel_size=3, padding=1),
+            nn.BatchNorm2d(decoder_channels // 8),
+            nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 32x - FULL RESOLUTION!
         )
         
         # Segmentation head
@@ -51,7 +59,8 @@ class SimpleDecoder(nn.Module):
         x = self.decoder_block1(x)  # 2x
         x = self.decoder_block2(x)  # 4x
         x = self.decoder_block3(x)  # 8x
-        x = self.decoder_block4(x)  # 16x (back to original resolution)
+        x = self.decoder_block4(x)  # 16x
+        x = self.decoder_block5(x)  # 32x - matches input size!
         x = self.segmentation_head(x)
         return x
 
@@ -119,10 +128,15 @@ class ASPPModule(nn.Module):
 
 class UncertaintyGatedFusionModel(nn.Module):
     """
-    Uncertainty-Gated Fusion Network (UGF-Net)
+    Uncertainty-Gated Fusion Network (UGF-Net) - FIXED VERSION
     
     Key Innovation: Uses pixel-wise epistemic uncertainty from auxiliary heads
     to dynamically weight RGB vs NIR features at each spatial location.
+    
+    IMPROVEMENTS:
+    1. Proper high-resolution output (512x1024)
+    2. Enhanced decoder with 5 upsampling blocks
+    3. Better auxiliary head design for uncertainty estimation
     """
     
     def __init__(self, num_classes=30, encoder_name='resnet50', encoder_weights='imagenet'):
@@ -150,18 +164,25 @@ class UncertaintyGatedFusionModel(nn.Module):
         
         encoder_channels = self.rgb_encoder.out_channels
         
-        # === THE NOVELTY: Auxiliary Uncertainty Heads ===
-        # These heads force each encoder to attempt segmentation independently
-        # Their confusion (entropy) tells us which sensor to trust
+        # === IMPROVED AUXILIARY UNCERTAINTY HEADS ===
+        # Better design with more capacity for uncertainty estimation
         self.rgb_aux_head = nn.Sequential(
-            nn.Conv2d(encoder_channels[-1], 256, kernel_size=3, padding=1),
+            nn.Conv2d(encoder_channels[-1], 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.Dropout2d(0.1),
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.Conv2d(256, num_classes, kernel_size=1)
         )
         
         self.nir_aux_head = nn.Sequential(
-            nn.Conv2d(encoder_channels[-1], 256, kernel_size=3, padding=1),
+            nn.Conv2d(encoder_channels[-1], 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.Dropout2d(0.1),
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.Conv2d(256, num_classes, kernel_size=1)
@@ -172,11 +193,11 @@ class UncertaintyGatedFusionModel(nn.Module):
             nn.Conv2d(encoder_channels[-1] * 2, encoder_channels[-1], 
                      kernel_size=3, padding=1),
             nn.BatchNorm2d(encoder_channels[-1]),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.1)
         )
         
-        # Use a simpler custom decoder instead of DeepLabV3+
-        # to avoid API compatibility issues
+        # HIGH-RESOLUTION DECODER
         self.decoder = SimpleDecoder(
             encoder_channels=encoder_channels,
             decoder_channels=256,
@@ -239,7 +260,7 @@ class UncertaintyGatedFusionModel(nn.Module):
         combined = torch.cat([rgb_bottleneck, fused_bottleneck], dim=1)
         combined = self.fusion_conv(combined)
         
-        # 6. Decode 
+        # 6. Decode to FULL RESOLUTION
         final_output = self.decoder(combined)
         
         # During training, return auxiliary outputs for deep supervision
@@ -259,7 +280,7 @@ class UncertaintyGatedFusionModel(nn.Module):
             )
             return final_output, rgb_aux_out, nir_aux_out, rgb_gate, nir_gate
         
-        # During inference, optionally return gates for visualization
+        # During inference, return gates for visualization
         return final_output, rgb_gate, nir_gate
 
 
@@ -337,24 +358,73 @@ def get_model(model_type='ugf', num_classes=30, encoder_name='resnet50'):
 
 
 if __name__ == '__main__':
-    # Test the UGF model
-    batch_size = 2
-    rgb = torch.randn(batch_size, 3, 512, 1024)
-    nir = torch.randn(batch_size, 1, 512, 1024)
+    # Test the FIXED UGF model
+    print("="*80)
+    print("TESTING FIXED UGF-NET WITH HIGH-RESOLUTION OUTPUT")
+    print("="*80)
     
-    print("Testing UGF-Net...")
+    batch_size = 2
+    img_size = (512, 1024)  # H, W
+    rgb = torch.randn(batch_size, 3, img_size[0], img_size[1])
+    nir = torch.randn(batch_size, 1, img_size[0], img_size[1])
+    
+    print(f"\nInput shapes:")
+    print(f"  RGB: {rgb.shape}")
+    print(f"  NIR: {nir.shape}")
+    
     model = UncertaintyGatedFusionModel(num_classes=30)
+    
+    # Test training mode
+    print("\n" + "-"*80)
+    print("TRAINING MODE")
+    print("-"*80)
     model.train()
     
     output, rgb_aux, nir_aux, rgb_gate, nir_gate = model(rgb, nir)
     
-    print(f"Main output shape: {output.shape}")
-    print(f"RGB aux shape: {rgb_aux.shape}")
-    print(f"NIR aux shape: {nir_aux.shape}")
-    print(f"RGB gate shape: {rgb_gate.shape}")
-    print(f"NIR gate shape: {nir_gate.shape}")
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+    print(f"Output shapes:")
+    print(f"  Main output: {output.shape}")
+    print(f"  RGB aux: {rgb_aux.shape}")
+    print(f"  NIR aux: {nir_aux.shape}")
+    print(f"  RGB gate: {rgb_gate.shape}")
+    print(f"  NIR gate: {nir_gate.shape}")
     
-    # Test output size matches input
-    assert output.shape == (batch_size, 30, 512, 1024), f"Output shape mismatch: {output.shape}"
-    print("\n✓ Output size correct!")
+    # Verify output size matches input size
+    expected = (batch_size, 30, img_size[0], img_size[1])
+    assert output.shape == expected, f"❌ Output shape wrong! Expected {expected}, got {output.shape}"
+    assert rgb_aux.shape == expected, f"❌ RGB aux wrong! Expected {expected}, got {rgb_aux.shape}"
+    assert nir_aux.shape == expected, f"❌ NIR aux wrong! Expected {expected}, got {nir_aux.shape}"
+    
+    print("\n✓ All shapes correct!")
+    
+    # Test inference mode
+    print("\n" + "-"*80)
+    print("INFERENCE MODE")
+    print("-"*80)
+    model.eval()
+    
+    with torch.no_grad():
+        output, rgb_gate, nir_gate = model(rgb, nir)
+    
+    print(f"Output shapes:")
+    print(f"  Main output: {output.shape}")
+    print(f"  RGB gate: {rgb_gate.shape}")
+    print(f"  NIR gate: {nir_gate.shape}")
+    
+    assert output.shape == expected, f"❌ Output wrong! Expected {expected}, got {output.shape}"
+    
+    print("\n✓ Inference mode correct!")
+    
+    # Model info
+    params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"\nModel parameters: {params:.2f}M")
+    
+    print("\n" + "="*80)
+    print("✓ ALL TESTS PASSED! Ready for training.")
+    print("="*80)
+    print("\nKey improvements:")
+    print("  1. ✓ Outputs at full resolution (512x1024)")
+    print("  2. ✓ 5-block decoder for proper 32x upsampling")
+    print("  3. ✓ Enhanced auxiliary heads with dropout")
+    print("  4. ✓ Better feature fusion with dropout")
+    print("\nNow run: python quick_train_LH.py")
