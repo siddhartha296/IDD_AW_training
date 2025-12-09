@@ -133,7 +133,7 @@ def run_full_training():
     CONFIG = {
         'data_root': '/home/jupyter-228w1a12b8/dec_7/IDD_AW/IDD_AW/IDDAW',
         'batch_size': 8,  # Adjust based on GPU memory
-        'num_epochs': 15,
+        'num_epochs': 30,
         'img_size': (512, 1024),
         'num_classes': 30,
         'models_to_train': ['baseline', 'early', 'late', 'adaptive'],
